@@ -7,7 +7,7 @@ const readline = require('readline');
 
 // === Настройки ===
 const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSqhgkTa8_0nMhbIt5yKykCkB3F88hSR-w8dcQj8Z1wem-3zCA5GgDSAsQzhIbXIHEqIRzqdv-vA_OV/pub?gid=0&single=true&output=csv";
-const IO_API_KEY = "io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjUxYjk5MDMxLTk2YTYtNGJhYy05ZjU0LWFiNDVjMmEwM2ZhMiIsImV4cCI6NDkwOTU0OTk2M30.TOncLbG3AHMo87YjVuc63KXQtQxfFhyVnqvYGU6jrtZUBmx5N-JfBSP54lP4BrM7gYvLB0-D6yBAHOZqenD0aw";
+const IO_API_KEY = process.env.IO_API_KEY;
 const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions";
 const MODEL = "deepseek-ai/DeepSeek-R1-0528";
 
