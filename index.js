@@ -6,13 +6,13 @@ const http = require('http');
 // === Настройки ===
 const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSqhgkTa8_0nMhbIt5yKykCkB3F88hSR-w8dcQj8Z1wem-3zCA5GgDSAsQzhIbXIHEqIRzqdv-vA_OV/pub?gid=0&single=true&output=csv";
 const IO_API_KEY = process.env.IO_API_KEY; // Берём из переменных окружения!
-const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions";
+const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions"; // Убраны лишние пробелы
 const MODEL = "deepseek-ai/DeepSeek-R1-0528";
 
 // === Глобальная база знаний ===
 let kb = null;
 
-// === Транслит и синонимы (оставь как есть) ===
+// === Транслит и синонимы ===
 const TRANSLIT_MAP = {
   'a': 'а', 'b': 'б', 'v': 'в', 'g': 'г', 'd': 'д', 'e': 'е', 'yo': 'ё',
   'zh': 'ж', 'z': 'з', 'i': 'и', 'j': 'й', 'k': 'к', 'l': 'л', 'm': 'м',
@@ -61,15 +61,22 @@ const SYNONYMS = {
   'internet': ['şəbəkə', 'bağlantı', 'əlaqə']
 };
 
+// ✅ Исправленная функция определения языка
 function detectLanguage(text) {
   const ruCount = (text.match(/[а-яА-ЯёЁ]/g) || []).length;
-  const azSpecific = (text.match(/[əƏıİğГгУуьёЪъёЩЩЩ]/g) || []).length;
+  const azSpecific = (text.match(/[əƏıİüğÜöÇşŞ]/g) || []).length; // ✅ Правильные символы азербайджанского
+
   if (azSpecific > 0) return 'az';
   if (ruCount > 0) return 'ru';
+
   const converted = convertTranslit(text.toLowerCase());
   const ruCountAfter = (converted.match(/[а-яА-ЯёЁ]/g) || []).length;
-  if (ruCountAfter > text.length * 0.3) return 'ru_translit';
-  return 'az';
+
+  if (ruCountAfter > text.length * 0.3) {
+    return 'ru_translit';
+  }
+
+  return 'az'; // по умолчанию — азербайджанский
 }
 
 function convertTranslit(text) {
@@ -85,9 +92,11 @@ function convertTranslit(text) {
 function normalizeText(text, lang) {
   let normalized = text.toLowerCase();
   if (lang === 'ru_translit') normalized = convertTranslit(normalized);
+  
   const synonymDict = lang.startsWith('ru') 
     ? Object.entries(SYNONYMS).filter(([k]) => /[а-я]/.test(k))
     : Object.entries(SYNONYMS).filter(([k]) => /[a-z]/.test(k));
+  
   synonymDict.forEach(([key, syns]) => {
     const allWords = [key, ...syns];
     allWords.forEach(word => {
@@ -96,12 +105,15 @@ function normalizeText(text, lang) {
       }
     });
   });
+  
   const stopWords = lang.startsWith('ru') 
     ? ['мой', 'моя', 'мое', 'наш', 'ваш', 'свой', 'это', 'эта']
     : ['menim', 'bizim', 'sizin', 'bu', 'o'];
+  
   stopWords.forEach(word => {
     normalized = normalized.replace(new RegExp(`\\b${word}\\b`, 'gi'), '');
   });
+  
   return normalized
     .replace(/[^\p{L}\p{N}]/gu, ' ')
     .split(/\s+/)
@@ -137,7 +149,7 @@ function filterKB(question, kb, detectedLang) {
     .map(r => {
       const scoreRu = getSimilarity(question, r.question_ru, detectedLang, 'ru');
       const scoreAz = getSimilarity(question, r.question_az, detectedLang, 'az');
-      return { ...r, semanticScore: Math.max(scoreRu, scoreAz), matchedLang: scoreRu > scoreAz ? 'ru' : 'az' };
+      return { ...r, semanticScore: Math.max(scoreRu, scoreAz) };
     })
     .filter(r => r.semanticScore > 0.15)
     .sort((a, b) => b.semanticScore - a.semanticScore)
@@ -159,27 +171,41 @@ function extractFinalAnswer(rawResponse) {
   return cleaned || rawResponse.trim();
 }
 
+// ✅ Улучшенная функция askAI — язык ответа соответствует языку вопроса
 async function askAI(question, kb, detectedLang) {
   const filteredKB = filterKB(question, kb, detectedLang);
+  
   if (filteredKB.length === 0) {
-    return detectedLang.startsWith('ru') 
-      ? "К сожалению, я не нашел подходящий ответ. Попробуйте переформулировать вопрос." 
-      : "Təəssüf ki, uyğun cavab tapa bilmədim. Sualı yenidən formalaşdırmağa çalışın.";
+    return detectedLang === 'az'
+      ? "Təəssüf ki, uyğun cavab tapa bilmədim. Sualı yenidən formalaşdırmağa çalışın."
+      : "К сожалению, я не нашел подходящий ответ. Попробуйте переформулировать вопрос.";
   }
-  const answerLang = filteredKB[0].matchedLang || (detectedLang.startsWith('ru') ? 'ru' : 'az');
-  if (filteredKB[0].semanticScore > 0.8) {
+
+  // 🔥 Определяем язык ответа: если az — отвечаем на az, иначе на ru
+  const answerLang = detectedLang === 'az' ? 'az' : 'ru';
+
+  // 🔍 Сначала ищем точный ответ на нужном языке
+  const exactQuestion = answerLang === 'ru' ? filteredKB[0].question_ru : filteredKB[0].question_az;
+  const similarity = getSimilarity(question, exactQuestion, detectedLang, answerLang);
+
+  if (similarity > 0.8) {
     return answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
   }
-  const kbText = filteredKB.slice(0, 5).map((r, i) => {
-    const q = answerLang === 'ru' ? r.question_ru : r.question_az;
-    const a = answerLang === 'ru' ? r.answer_ru : r.answer_az;
-    return `[${i+1}] Q: ${q}\nA: ${a}`;
-  }).join('\n\n');
+
+  // 📚 Формируем контекст на нужном языке
+  const kbText = filteredKB
+    .slice(0, 5)
+    .map((r, i) => {
+      const q = answerLang === 'ru' ? r.question_ru : r.question_az;
+      const a = answerLang === 'ru' ? r.answer_ru : r.answer_az;
+      return `[${i+1}] Q: ${q}\nA: ${a}`;
+    })
+    .join('\n\n');
 
   const systemPrompt = `
 You are a helpful support assistant. Your task is to provide a clear, complete, and natural-language answer based on the knowledge base.
 - Use only the provided context.
-- Answer in the same language as the question.
+- Answer strictly in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
 - Do not include any thinking, reasoning or explanation tags like <think>, [thinking], etc.
 - Do not say "Based on the information", "Thinking", etc.
 - If the answer is long, return the full text.
@@ -188,11 +214,9 @@ You are a helpful support assistant. Your task is to provide a clear, complete, 
 
   const userPrompt = `
 Question: ${question}
-Target language: ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}
 
 Instructions:
-- Provide a full, detailed, and natural-sounding answer based on the knowledge base.
-- Do not shorten or summarize unless the information is very brief.
+- Provide a full, detailed, and natural-sounding answer in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
 - Do not add disclaimers like 'Based on the information' or 'I think'.
 - Just answer directly and completely.
 
@@ -210,13 +234,24 @@ ${kbText}
       temperature: 0.1,
       max_tokens: 4096
     }, {
-      headers: { Authorization: `Bearer ${IO_API_KEY}` },
+      headers: { 
+        Authorization: `Bearer ${IO_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
       timeout: 30000
     });
+
     const rawAnswer = response.data.choices[0].message.content;
     const finalAnswer = extractFinalAnswer(rawAnswer);
-    return finalAnswer || (answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az);
+    
+    if (!finalAnswer || finalAnswer.toLowerCase().includes("нет ответа")) {
+      return answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+    }
+    
+    return finalAnswer;
+    
   } catch (error) {
+    console.error("❌ Ошибка при запросе к ИИ:", error.message);
     return answerLang === 'ru' 
       ? "Произошла ошибка. Попробуйте позже." 
       : "Xəta baş verdi. Sonra cəhd edin.";
@@ -225,12 +260,28 @@ ${kbText}
 
 // === HTTP-сервер ===
 const server = http.createServer(async (req, res) => {
+  // ✅ Главная страница
+  if (req.url === '/' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+      <h1>🤖 Support Bot API</h1>
+      <p>Готов к работе!</p>
+      <ul>
+        <li><a href="/health">/health</a> — проверка состояния</li>
+        <li><code>POST /ask</code> — получить ответ (JSON)</li>
+      </ul>
+    `);
+    return;
+  }
+
+  // ✅ Проверка состояния
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', kb_loaded: !!kb }));
     return;
   }
 
+  // ✅ Обработка вопроса
   if (req.url === '/ask' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -250,6 +301,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ❌ Неизвестный маршрут
   res.writeHead(404);
   res.end('Not found');
 });
