@@ -1,20 +1,59 @@
-// index.js — HTTP-сервер для Render + Omnidesk
+// index.js — Этап 1: Support Bot с логикой эскалации
 const axios = require('axios');
 const { parse } = require('csv-parse/sync');
 const http = require('http');
 
 // === Настройки ===
-// ✅ ИСПРАВЛЕН URL - теперь соответствует вашей таблице
 const SHEET_URL = "https://docs.google.com/spreadsheets/d/1m4-2_NOG_cqJn6XAHgsVfHZNC2MXMBRBgY8c6poOYAg/export?format=csv&gid=0";
-
-const IO_API_KEY = process.env.IO_API_KEY; // Берём из переменных окружения!
+const IO_API_KEY = process.env.IO_API_KEY;
 const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions";
 const MODEL = "deepseek-ai/DeepSeek-R1-0528";
 
 // === Глобальная база знаний ===
 let kb = null;
 
-// === Транслит и синонимы ===
+// === Состояние активных чатов ===
+let activeSessions = new Map(); // sessionId -> { stage, lastMessage, language, questionCount }
+
+// === Ключевые слова для эскалации ===
+const ESCALATION_KEYWORDS = {
+  ru: [
+    'оператор', 'живой человек', 'сотрудник', 'менеджер', 'специалист',
+    'не помогает', 'не работает', 'не решается', 'проблема не решена',
+    'переведите', 'соедините', 'хочу поговорить', 'нужна помощь человека',
+    'срочно', 'жалоба', 'недоволен', 'плохо работает', 'баг', 'ошибка',
+    'не понимаю', 'сложная проблема', 'индивидуальный случай'
+  ],
+  az: [
+    'operator', 'canlı insan', 'əməkdaş', 'menecer', 'mütəxəssis',
+    'kömək etmir', 'işləmir', 'həll olunmur', 'problem həll olunmadı',
+    'köçürün', 'birləşdirin', 'danışmaq istəyirəm', 'insanın köməyi lazımdır',
+    'təcili', 'şikayət', 'narazıyam', 'pis işləyir', 'səhv', 'xəta',
+    'başa düşmürəm', 'mürəkkəb problem', 'fərdi hal'
+  ],
+  translit: [
+    'operator', 'chelovek', 'sotrudnik', 'menedjer', 'specialist',
+    'ne pomogaet', 'ne rabotaet', 'problema ne reshena',
+    'perevedite', 'soedините', 'hochu govorit', 'nuzhna pomosh cheloveka',
+    'srochno', 'zhaloba', 'nedovolen', 'plokho rabotaet'
+  ]
+};
+
+// === Ключевые слова завершения ===
+const COMPLETION_KEYWORDS = {
+  ru: [
+    'спасибо', 'спс', 'благодарю', 'все понятно', 'все ясно',
+    'вопросов нет', 'больше вопросов нет', 'все хорошо', 'решено',
+    'помогло', 'разобрался', 'разобралась', 'понял', 'поняла'
+  ],
+  az: [
+    'təşəkkür', 'sağol', 'minnettaram', 'hamısı aydındır', 'hamısı başa düşülür',
+    'sual yoxdur', 'daha sual yoxdur', 'hər şey yaxşıdır', 'həll olundu',
+    'kömək etdi', 'başa düşdüm', 'anladım'
+  ]
+};
+
+// === Транслит и синонимы (существующий код) ===
 const TRANSLIT_MAP = {
   'a': 'а', 'b': 'б', 'v': 'в', 'g': 'г', 'd': 'д', 'e': 'е', 'yo': 'ё',
   'zh': 'ж', 'z': 'з', 'i': 'и', 'j': 'й', 'k': 'к', 'l': 'л', 'm': 'м',
@@ -31,17 +70,6 @@ const TRANSLIT_MAP = {
   'otvet': 'ответ', 'answer': 'ответ',
   'rabota': 'работа', 'work': 'работа', 'rabotat': 'работать',
   'ne rabotaet': 'не работает', 'ne pashet': 'не пашет',
-  'moqu': 'могу', 'mogu': 'могу', 'mozhet': 'может',
-  'nado': 'надо', 'nuzhno': 'нужно', 'need': 'нужно',
-  'kak': 'как', 'how': 'как', 'gde': 'где', 'where': 'где',
-  'kogda': 'когда', 'when': 'когда', 'pochemu': 'почему', 'why': 'почему',
-  'chto': 'что', 'what': 'что', 'skolko': 'сколько',
-  'izmenit': 'изменить', 'change': 'изменить', 'pomenyat': 'поменять',
-  'dobavit': 'добавить', 'add': 'добавить', 'sozdat': 'создать',
-  'udalit': 'удалить', 'delete': 'удалить', 'ubrat': 'убрать',
-  'voiti': 'войти', 'login': 'войти', 'vhod': 'вход',
-  'viyti': 'выйти', 'logout': 'выйти', 'vihod': 'выход',
-  'registracia': 'регистрация', 'registration': 'регистрация',
   'dobriy den': 'добрый день', 'zdravstvuite': 'здравствуйте',
   'spasibo': 'спасибо', 'pozhalusta': 'пожалуйста'
 };
@@ -53,20 +81,13 @@ const SYNONYMS = {
   'работает': ['пашет', 'функционирует', 'действует', 'идет'],
   'не работает': ['не пашет', 'сломался', 'глючит', 'виснет', 'тормозит', 'барахлит'],
   'пароль': ['код', 'ключ', 'пасс'],
-  'интернет': ['инет', 'сеть', 'подключение', 'коннект', 'связь'],
-  'dəyişmək': ['dəyişdirmək', 'yeniləmək', 'əvəz etmək'],
-  'daxil olmaq': ['girmək', 'keçmək'],
-  'yaratmaq': ['etmək', 'əlavə etmək', 'açmaq'],
-  'işləyir': ['fəaliyyət göstərir', 'aktivdir'],
-  'işləmir': ['xarabdır', 'problem var', 'bağlıdır'],
-  'şifrə': ['parol', 'kod', 'açar'],
-  'internet': ['şəbəkə', 'bağlantı', 'əlaqə']
+  'интернет': ['инет', 'сеть', 'подключение', 'коннект', 'связь']
 };
 
-// ✅ Исправленная функция определения языка
+// === Функции определения языка (существующий код) ===
 function detectLanguage(text) {
   const ruCount = (text.match(/[а-яА-ЯёЁ]/g) || []).length;
-  const azSpecific = (text.match(/[əƏıİüğÜöÇşŞ]/g) || []).length; // ✅ Правильные символы азербайджанского
+  const azSpecific = (text.match(/[əƏıİüğÜöÇşŞ]/g) || []).length;
   
   if (azSpecific > 0) return 'az';
   if (ruCount > 0) return 'ru';
@@ -78,7 +99,7 @@ function detectLanguage(text) {
     return 'ru_translit';
   }
   
-  return 'az'; // по умолчанию — азербайджанский
+  return 'az';
 }
 
 function convertTranslit(text) {
@@ -93,6 +114,73 @@ function convertTranslit(text) {
   return converted;
 }
 
+// === Новые функции для управления диалогом ===
+function shouldEscalateToHuman(question, detectedLang) {
+  const normalizedQuestion = question.toLowerCase();
+  
+  let keywordsToCheck = [];
+  if (detectedLang === 'ru' || detectedLang === 'ru_translit') {
+    keywordsToCheck = [...ESCALATION_KEYWORDS.ru, ...ESCALATION_KEYWORDS.translit];
+  } else if (detectedLang === 'az') {
+    keywordsToCheck = ESCALATION_KEYWORDS.az;
+  }
+  
+  const foundKeywords = keywordsToCheck.filter(keyword => 
+    normalizedQuestion.includes(keyword.toLowerCase())
+  );
+  
+  if (foundKeywords.length > 0) {
+    console.log(`🔄 Найдены ключевые слова для эскалации: ${foundKeywords.join(', ')}`);
+    return true;
+  }
+  
+  return false;
+}
+
+function shouldCompleteChat(question, detectedLang) {
+  const normalizedQuestion = question.toLowerCase();
+  
+  let keywordsToCheck = [];
+  if (detectedLang === 'ru' || detectedLang === 'ru_translit') {
+    keywordsToCheck = COMPLETION_KEYWORDS.ru;
+  } else if (detectedLang === 'az') {
+    keywordsToCheck = COMPLETION_KEYWORDS.az;
+  }
+  
+  return keywordsToCheck.some(keyword => 
+    normalizedQuestion.includes(keyword.toLowerCase())
+  );
+}
+
+function getGreeting(language) {
+  if (language === 'az') {
+    return "Salam! Mən Algo-bot, virtual köməkçiyəm. Sizə maksimal şəkildə kömək etməyə hazıram. Nə barədə məlumat almaq istərdiniz?";
+  }
+  return "Здравствуйте! Я Алго-бот, виртуальный помощник. Готов максимально помочь с вашими вопросами. О чем хотели бы узнать?";
+}
+
+function getFollowUpQuestion(language) {
+  if (language === 'az') {
+    return "\n\nBu mövzu ilə bağlı başqa sualınız varmı?";
+  }
+  return "\n\nОстались ли еще вопросы по этой теме?";
+}
+
+function getCompletionMessage(language) {
+  if (language === 'az') {
+    return "Əla! Sizə kömək edə bildiyimə şadam. Başqa sualla əlaqədər hər zaman müraciət edə bilərsiniz.";
+  }
+  return "Отлично! Рад, что смог помочь. По другим вопросам всегда можете обращаться.";
+}
+
+function getEscalationMessage(language) {
+  if (language === 'az') {
+    return "Sizi mütəxəssisə yönləndirirəm. Bir az gözləyin...";
+  }
+  return "Передаю вас специалисту. Один момент...";
+}
+
+// === Существующие функции поиска ===
 function normalizeText(text, lang) {
   let normalized = text.toLowerCase();
   if (lang === 'ru_translit') normalized = convertTranslit(normalized);
@@ -179,28 +267,98 @@ function extractFinalAnswer(rawResponse) {
   return cleaned || rawResponse.trim();
 }
 
-// ✅ Улучшенная функция askAI — язык ответа соответствует языку вопроса
-async function askAI(question, kb, detectedLang) {
+// === Основная логика бота ===
+async function askAI(question, kb, detectedLang, sessionId = null) {
+  // Инициализация сессии если нужно
+  if (sessionId && !activeSessions.has(sessionId)) {
+    activeSessions.set(sessionId, {
+      stage: 'greeting',
+      lastMessage: Date.now(),
+      language: detectedLang,
+      questionCount: 0
+    });
+    return {
+      answer: getGreeting(detectedLang),
+      sessionStage: 'greeting',
+      needsEscalation: false
+    };
+  }
+
+  // Получаем состояние сессии
+  const session = sessionId ? activeSessions.get(sessionId) : null;
+  if (session) {
+    session.lastMessage = Date.now();
+    session.questionCount++;
+  }
+
+  // Проверяем завершение диалога
+  if (shouldCompleteChat(question, detectedLang)) {
+    if (sessionId) activeSessions.delete(sessionId);
+    return {
+      answer: getCompletionMessage(detectedLang),
+      sessionStage: 'completed',
+      needsEscalation: false
+    };
+  }
+
+  // Проверяем необходимость эскалации
+  if (shouldEscalateToHuman(question, detectedLang)) {
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    return {
+      answer: getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'user_request'
+    };
+  }
+
+  // Поиск ответа в базе знаний
   const filteredKB = filterKB(question, kb, detectedLang);
   
   if (filteredKB.length === 0) {
-    return detectedLang === 'az'
-      ? "Təəssüf ki, uyğun cavab tapa bilmədim. Sualı yenidən formalaşdırmağa çalışın."
-      : "К сожалению, я не нашел подходящий ответ. Попробуйте переформулировать вопрос.";
+    // Нет подходящих ответов - предлагаем эскалацию
+    const noAnswerMessage = detectedLang === 'az'
+      ? "Təəssüf ki, bu suala cavab tapa bilmədim. Sizə mütəxəssis kömək edə bilər."
+      : "К сожалению, не нашел ответ на этот вопрос. Вам поможет наш специалист.";
+      
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    
+    return {
+      answer: noAnswerMessage + "\n\n" + getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'no_answer',
+      confidence: 0
+    };
   }
-  
-  // 🔥 Определяем язык ответа: если az — отвечаем на az, иначе на ru
+
   const answerLang = detectedLang === 'az' ? 'az' : 'ru';
-  
-  // 🔍 Сначала ищем точный ответ на нужном языке
   const exactQuestion = answerLang === 'ru' ? filteredKB[0].question_ru : filteredKB[0].question_az;
   const similarity = getSimilarity(question, exactQuestion, detectedLang, answerLang);
   
+  // Высокое совпадение - даем прямой ответ
   if (similarity > 0.8) {
-    return answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+    const directAnswer = answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+    const fullAnswer = directAnswer + getFollowUpQuestion(detectedLang);
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'answered' });
+    }
+    
+    return {
+      answer: fullAnswer,
+      sessionStage: 'answered',
+      needsEscalation: false,
+      confidence: similarity,
+      source: 'direct_match'
+    };
   }
-  
-  // 📚 Формируем контекст на нужном языке
+
+  // Среднее совпадение - используем ИИ
   const kbText = filteredKB
     .slice(0, 5)
     .map((r, i) => {
@@ -214,8 +372,7 @@ async function askAI(question, kb, detectedLang) {
 You are a helpful support assistant. Your task is to provide a clear, complete, and natural-language answer based on the knowledge base.
 - Use only the provided context.
 - Answer strictly in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
-- Do not include any thinking, reasoning or explanation tags like <think>, [thinking], etc.
-- Do not say "Based on the information", "Thinking", etc.
+- Do not include any thinking, reasoning or explanation tags.
 - If the answer is long, return the full text.
 - Do not shorten or summarize unless necessary.
 `.trim();
@@ -224,7 +381,6 @@ You are a helpful support assistant. Your task is to provide a clear, complete, 
 Question: ${question}
 Instructions:
 - Provide a full, detailed, and natural-sounding answer in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
-- Do not add disclaimers like 'Based on the information' or 'I think'.
 - Just answer directly and completely.
 
 Available context:
@@ -252,49 +408,163 @@ ${kbText}
     const finalAnswer = extractFinalAnswer(rawAnswer);
     
     if (!finalAnswer || finalAnswer.toLowerCase().includes("нет ответа")) {
-      return answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+      const fallbackAnswer = answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+      const fullAnswer = fallbackAnswer + getFollowUpQuestion(detectedLang);
+      
+      if (sessionId) {
+        activeSessions.set(sessionId, { ...session, stage: 'answered' });
+      }
+      
+      return {
+        answer: fullAnswer,
+        sessionStage: 'answered',
+        needsEscalation: false,
+        confidence: similarity,
+        source: 'fallback'
+      };
     }
     
-    return finalAnswer;
+    const fullAnswer = finalAnswer + getFollowUpQuestion(detectedLang);
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'answered' });
+    }
+    
+    return {
+      answer: fullAnswer,
+      sessionStage: 'answered',
+      needsEscalation: false,
+      confidence: similarity,
+      source: 'ai_processed'
+    };
     
   } catch (error) {
     console.error("❌ Ошибка при запросе к ИИ:", error.message);
-    return answerLang === 'ru' 
-      ? "Произошла ошибка. Попробуйте позже." 
-      : "Xəta baş verdi. Sonra cəhd edin.";
+    const errorMessage = answerLang === 'ru' 
+      ? "Произошла ошибка. Передаю вас специалисту."
+      : "Xəta baş verdi. Sizi mütəxəssisə yönləndirirəm.";
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    
+    return {
+      answer: errorMessage,
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'technical_error',
+      error: error.message
+    };
   }
 }
 
 // === HTTP-сервер ===
 const server = http.createServer(async (req, res) => {
-  // ✅ Главная страница
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // Главная страница
   if (req.url === '/' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`
-      <h1>🤖 Support Bot API</h1>
-      <p>Готов к работе!</p>
-      <ul>
-        <li><a href="/health">/health</a> — проверка состояния</li>
-        <li><code>POST /ask</code> — получить ответ (JSON)</li>
-      </ul>
-      <p>База знаний: ${kb ? `${kb.length} записей загружено` : 'не загружена'}</p>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>🤖 Support Bot API - Этап 1</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 40px; }
+          .status { color: green; font-weight: bold; }
+          .endpoint { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+          .new { background: #e8f4fd; border-left: 4px solid #007bff; }
+        </style>
+      </head>
+      <body>
+        <h1>🤖 Support Bot API - Этап 1</h1>
+        <p class="status">Готов к работе с улучшенной логикой диалога!</p>
+        
+        <h2>Новые возможности:</h2>
+        <ul>
+          <li>✅ Приветствие пользователей</li>
+          <li>✅ Управление сессиями диалога</li>
+          <li>✅ Автоматическое определение эскалации</li>
+          <li>✅ Завершение диалогов</li>
+          <li>✅ Вопросы-уточнения после ответов</li>
+        </ul>
+        
+        <h2>Доступные endpoints:</h2>
+        <div class="endpoint">
+          <strong>GET /health</strong> - проверка состояния системы
+        </div>
+        <div class="endpoint new">
+          <strong>POST /chat</strong> - новый endpoint для диалогов с сессиями
+        </div>
+        <div class="endpoint">
+          <strong>POST /ask</strong> - простой endpoint для разовых вопросов
+        </div>
+        
+        <h2>Статус системы:</h2>
+        <ul>
+          <li>База знаний: ${kb ? `${kb.length} записей ✅` : 'не загружена ❌'}</li>
+          <li>ИИ модель: ${IO_API_KEY ? 'настроена ✅' : 'НЕ настроена ❌'}</li>
+          <li>Активных сессий: ${activeSessions.size}</li>
+        </ul>
+      </body>
+      </html>
     `);
     return;
   }
   
-  // ✅ Проверка состояния
+  // Проверка состояния
   if (req.url === '/health' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ 
       status: 'ok', 
+      version: 'stage1',
       kb_loaded: !!kb, 
       kb_records: kb ? kb.length : 0,
+      active_sessions: activeSessions.size,
+      ai_configured: !!IO_API_KEY,
       timestamp: new Date().toISOString()
     }));
     return;
   }
   
-  // ✅ Обработка вопроса
+  // Новый endpoint для диалогов с сессиями
+  if (req.url === '/chat' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { question, sessionId } = JSON.parse(body);
+        if (!question) throw new Error('No question provided');
+        
+        const detectedLang = detectLanguage(question);
+        const result = await askAI(question, kb, detectedLang, sessionId);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ 
+          ...result, 
+          language: detectedLang,
+          sessionId: sessionId,
+          timestamp: new Date().toISOString()
+        }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+  
+  // Существующий endpoint для совместимости
   if (req.url === '/ask' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -304,22 +574,41 @@ const server = http.createServer(async (req, res) => {
         if (!question) throw new Error('No question provided');
         
         const detectedLang = detectLanguage(question);
-        const answer = await askAI(question, kb, detectedLang);
+        const result = await askAI(question, kb, detectedLang);
         
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ answer, language: detectedLang }));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ 
+          answer: result.answer,
+          language: detectedLang,
+          needsEscalation: result.needsEscalation,
+          confidence: result.confidence,
+          timestamp: new Date().toISOString()
+        }));
       } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: err.message }));
       }
     });
     return;
   }
   
-  // ❌ Неизвестный маршрут
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Not found' }));
+  // 404
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ error: 'Endpoint not found' }));
 });
+
+// === Очистка неактивных сессий ===
+setInterval(() => {
+  const now = Date.now();
+  const timeout = 10 * 60 * 1000; // 10 минут
+  
+  for (const [sessionId, session] of activeSessions.entries()) {
+    if (now - session.lastMessage > timeout) {
+      console.log(`🧹 Удаляем неактивную сессию: ${sessionId}`);
+      activeSessions.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000); // проверяем каждые 5 минут
 
 // === Запуск ===
 (async () => {
@@ -338,24 +627,22 @@ const server = http.createServer(async (req, res) => {
       question_az: (r['Sual_az'] || '').trim(),
       answer_ru: (r['Cavab_ru'] || '').trim(),
       answer_az: (r['Cavab_az'] || '').trim(),
-      project: (r['Project'] || '').trim() // ✅ Добавлено новое поле
+      project: (r['Project'] || '').trim()
     })).filter(r => (r.question_ru || r.question_az) && (r.answer_ru || r.answer_az));
     
     console.log(`✅ Загружено ${kb.length} записей`);
-    console.log(`📝 Пример записи:`, kb[0] ? {
-      id: kb[0].id,
-      question_ru: kb[0].question_ru.substring(0, 50) + "...",
-      project: kb[0].project
-    } : "База пуста");
     
   } catch (error) {
     console.error("❌ Ошибка загрузки KB:", error.message);
-    console.error("🔗 URL:", SHEET_URL);
   }
 
   const PORT = process.env.PORT || 10000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Сервер запущен на порту ${PORT}`);
     console.log(`🔗 Доступен по адресу: http://0.0.0.0:${PORT}`);
+    console.log(`📋 Этап 1: Базовая логика диалога готова`);
+    console.log(`   - Управление сессиями: включено`);
+    console.log(`   - Автоэскалация: включена`);
+    console.log(`   - ИИ модель: ${IO_API_KEY ? 'настроена' : 'НЕ настроена'}`);
   });
 })();
