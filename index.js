@@ -4,9 +4,11 @@ const { parse } = require('csv-parse/sync');
 const http = require('http');
 
 // === Настройки ===
-const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSqhgkTa8_0nMhbIt5yKykCkB3F88hSR-w8dcQj8Z1wem-3zCA5GgDSAsQzhIbXIHEqIRzqdv-vA_OV/pub?gid=0&single=true&output=csv";
+// ✅ ИСПРАВЛЕН URL - теперь соответствует вашей таблице
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/1m4-2_NOG_cqJn6XAHgsVfHZNC2MXMBRBgY8c6poOYAg/export?format=csv&gid=0";
+
 const IO_API_KEY = process.env.IO_API_KEY; // Берём из переменных окружения!
-const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions"; // Убраны лишние пробелы
+const IO_ENDPOINT = "https://api.intelligence.io.solutions/api/v1/chat/completions";
 const MODEL = "deepseek-ai/DeepSeek-R1-0528";
 
 // === Глобальная база знаний ===
@@ -65,27 +67,29 @@ const SYNONYMS = {
 function detectLanguage(text) {
   const ruCount = (text.match(/[а-яА-ЯёЁ]/g) || []).length;
   const azSpecific = (text.match(/[əƏıİüğÜöÇşŞ]/g) || []).length; // ✅ Правильные символы азербайджанского
-
+  
   if (azSpecific > 0) return 'az';
   if (ruCount > 0) return 'ru';
-
+  
   const converted = convertTranslit(text.toLowerCase());
   const ruCountAfter = (converted.match(/[а-яА-ЯёЁ]/g) || []).length;
-
+  
   if (ruCountAfter > text.length * 0.3) {
     return 'ru_translit';
   }
-
+  
   return 'az'; // по умолчанию — азербайджанский
 }
 
 function convertTranslit(text) {
   let converted = text.toLowerCase();
   const sortedKeys = Object.keys(TRANSLIT_MAP).sort((a, b) => b.length - a.length);
+  
   sortedKeys.forEach(key => {
     const regex = new RegExp(`\\b${key}\\b`, 'gi');
     converted = converted.replace(regex, TRANSLIT_MAP[key]);
   });
+  
   return converted;
 }
 
@@ -126,7 +130,9 @@ function normalizeText(text, lang) {
 function getSimilarity(q1, q2, lang1, lang2) {
   const n1 = normalizeText(q1, lang1).split(' ');
   const n2 = normalizeText(q2, lang2).split(' ');
+  
   if (n1.length === 0 || n2.length === 0) return 0;
+  
   let matches = 0;
   n1.forEach(w1 => {
     n2.forEach(w2 => {
@@ -140,6 +146,7 @@ function getSimilarity(q1, q2, lang1, lang2) {
       }
     });
   });
+  
   return matches / Math.max(n1.length, n2.length);
 }
 
@@ -167,6 +174,7 @@ function extractFinalAnswer(rawResponse) {
     .replace(/Давайте[\s\S]*?(?=Ответ:|Итак|$)/gi, '')
     .replace(/Let me (?:think|analyze|check)[\s\S]*?(?=Answer:|Ответ:|Based|$)/gi, '')
     .replace(/Analyzing[\s\S]*?(?=Answer:|Ответ:|The answer|$)/gi, '');
+
   cleaned = cleaned.replace(/^(Ответ|Answer|Final answer|Итак|So)[:\s-]*/i, '').trim();
   return cleaned || rawResponse.trim();
 }
@@ -180,18 +188,18 @@ async function askAI(question, kb, detectedLang) {
       ? "Təəssüf ki, uyğun cavab tapa bilmədim. Sualı yenidən formalaşdırmağa çalışın."
       : "К сожалению, я не нашел подходящий ответ. Попробуйте переформулировать вопрос.";
   }
-
+  
   // 🔥 Определяем язык ответа: если az — отвечаем на az, иначе на ru
   const answerLang = detectedLang === 'az' ? 'az' : 'ru';
-
+  
   // 🔍 Сначала ищем точный ответ на нужном языке
   const exactQuestion = answerLang === 'ru' ? filteredKB[0].question_ru : filteredKB[0].question_az;
   const similarity = getSimilarity(question, exactQuestion, detectedLang, answerLang);
-
+  
   if (similarity > 0.8) {
     return answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
   }
-
+  
   // 📚 Формируем контекст на нужном языке
   const kbText = filteredKB
     .slice(0, 5)
@@ -214,7 +222,6 @@ You are a helpful support assistant. Your task is to provide a clear, complete, 
 
   const userPrompt = `
 Question: ${question}
-
 Instructions:
 - Provide a full, detailed, and natural-sounding answer in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
 - Do not add disclaimers like 'Based on the information' or 'I think'.
@@ -270,17 +277,23 @@ const server = http.createServer(async (req, res) => {
         <li><a href="/health">/health</a> — проверка состояния</li>
         <li><code>POST /ask</code> — получить ответ (JSON)</li>
       </ul>
+      <p>База знаний: ${kb ? `${kb.length} записей загружено` : 'не загружена'}</p>
     `);
     return;
   }
-
+  
   // ✅ Проверка состояния
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', kb_loaded: !!kb }));
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      kb_loaded: !!kb, 
+      kb_records: kb ? kb.length : 0,
+      timestamp: new Date().toISOString()
+    }));
     return;
   }
-
+  
   // ✅ Обработка вопроса
   if (req.url === '/ask' && req.method === 'POST') {
     let body = '';
@@ -288,9 +301,11 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const { question } = JSON.parse(body);
-        if (!question) throw new Error('No question');
+        if (!question) throw new Error('No question provided');
+        
         const detectedLang = detectLanguage(question);
         const answer = await askAI(question, kb, detectedLang);
+        
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ answer, language: detectedLang }));
       } catch (err) {
@@ -300,10 +315,10 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
-
+  
   // ❌ Неизвестный маршрут
-  res.writeHead(404);
-  res.end('Not found');
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
 });
 
 // === Запуск ===
@@ -311,6 +326,8 @@ const server = http.createServer(async (req, res) => {
   console.log("🚀 Загрузка базы знаний...");
   try {
     const res = await axios.get(SHEET_URL, { timeout: 10000 });
+    console.log("📊 Получен CSV размером:", res.data.length, "символов");
+    
     kb = parse(res.data, {
       columns: true,
       skip_empty_lines: true,
@@ -320,16 +337,25 @@ const server = http.createServer(async (req, res) => {
       question_ru: (r['Sual_ru'] || '').trim(),
       question_az: (r['Sual_az'] || '').trim(),
       answer_ru: (r['Cavab_ru'] || '').trim(),
-      answer_az: (r['Cavab_az'] || '').trim()
+      answer_az: (r['Cavab_az'] || '').trim(),
+      project: (r['Project'] || '').trim() // ✅ Добавлено новое поле
     })).filter(r => (r.question_ru || r.question_az) && (r.answer_ru || r.answer_az));
-
+    
     console.log(`✅ Загружено ${kb.length} записей`);
+    console.log(`📝 Пример записи:`, kb[0] ? {
+      id: kb[0].id,
+      question_ru: kb[0].question_ru.substring(0, 50) + "...",
+      project: kb[0].project
+    } : "База пуста");
+    
   } catch (error) {
     console.error("❌ Ошибка загрузки KB:", error.message);
+    console.error("🔗 URL:", SHEET_URL);
   }
 
   const PORT = process.env.PORT || 10000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Сервер запущен на порту ${PORT}`);
+    console.log(`🔗 Доступен по адресу: http://0.0.0.0:${PORT}`);
   });
 })();
