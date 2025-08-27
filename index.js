@@ -1,4 +1,128 @@
-// index.js — Этап 1: Support Bot с логикой эскалации
+// === Основная логика бота ===
+async function askAI(question, kb, detectedLang, sessionId = null) {
+  // Проверяем, это приветствие при создании новой сессии
+  if (sessionId && !activeSessions.has(sessionId)) {
+    activeSessions.set(sessionId, {
+      stage: 'greeting',
+      lastMessage: Date.now(),
+      language: detectedLang,
+      questionCount: 0
+    });
+    
+    // Для любого первого сообщения показываем приветствие
+    return {
+      answer: getGreeting(detectedLang),
+      sessionStage: 'greeting',
+      needsEscalation: false
+    };
+  }
+
+  // Получаем состояние сессии
+  const session = sessionId ? activeSessions.get(sessionId) : null;
+  if (session) {
+    session.lastMessage = Date.now();
+    session.questionCount++;
+  }
+
+  // Если это простое приветствие в активной сессии, отвечаем дружелюбно
+  if (isGreeting(question, detectedLang) && session && session.stage !== 'greeting') {
+    const friendlyReply = detectedLang === 'az' 
+      ? "Salam! Necə kömək edə bilərəm?"
+      : "Привет! Чем могу помочь?";
+    
+    return {
+      answer: friendlyReply,
+      sessionStage: 'active',
+      needsEscalation: false,
+      source: 'greeting_response'
+    };
+  }
+
+  // Проверяем завершение диалога
+  if (shouldCompleteChat(question, detectedLang)) {
+    if (sessionId) activeSessions.delete(sessionId);
+    return {
+      answer: getCompletionMessage(detectedLang),
+      sessionStage: 'completed',
+      needsEscalation: false
+    };
+  }
+
+  // Проверяем необходимость эскалации по ключевым словам
+  if (shouldEscalateToHuman(question, detectedLang)) {
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    return {
+      answer: getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'user_request'
+    };
+  }
+
+  // Поиск ответа в базе знаний
+  const filteredKB = filterKB(question, kb, detectedLang);
+  
+  if (filteredKB.length === 0) {
+    // Нет подходящих ответов - предлагаем эскалацию
+    const noAnswerMessage = detectedLang === 'az'
+      ? "Təəssüf ki, bu suala cavab tapa bilmədim. Sizə mütəxəssis kömək edə bilər."
+      : "К сожалению, не нашел ответ на этот вопрос. Вам поможет наш специалист.";
+      
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    
+    return {
+      answer: noAnswerMessage + "\n\n" + getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'no_answer',
+      confidence: 0
+    };
+  }
+
+  const answerLang = detectedLang === 'az' ? 'az' : 'ru';
+  const exactQuestion = answerLang === 'ru' ? filteredKB[0].question_ru : filteredKB[0].question_az;
+  const similarity = getSimilarity(question, exactQuestion, detectedLang, answerLang);
+  
+  // Получаем ответ из базы
+  const directAnswer = answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+  
+  // ✅ НОВАЯ ПРОВЕРКА: если ответ требует эскалации
+  if (shouldEscalateAnswer(directAnswer)) {
+    console.log(`🔄 Ответ требует эскалации: ${directAnswer.substring(0, 50)}...`);
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    
+    return {
+      answer: getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'requires_manual_processing',
+      originalAnswer: directAnswer // сохраняем оригинальный ответ для контекста
+    };
+  }
+  
+  // Высокое совпадение - даем прямой ответ
+  if (similarity > 0.8) {
+    const fullAnswer = directAnswer + getFollowUpQuestion(detectedLang);
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'answered' });
+    }
+    
+    return {
+      answer: fullAnswer,
+      sessionStage: 'answered',
+      needsEscalation: false,
+      confidence: similarity,
+      source: 'direct_match'
+    };
+  }// index.js — Этап 1: Support Bot с логикой эскалации
 const axios = require('axios');
 const { parse } = require('csv-parse/sync');
 const http = require('http');
@@ -137,6 +261,42 @@ function shouldEscalateToHuman(question, detectedLang) {
   return false;
 }
 
+// === Проверка ответов из базы на необходимость эскалации ===
+function shouldEscalateAnswer(answer) {
+  const escalationPhrases = [
+    'передан сотруднику',
+    'yönləndirildi', 
+    'məlumat veriləcək',
+    'будете уведомлены',
+    'xəbər veriləcək',
+    'əməkdaşa yönləndirildi'
+  ];
+  
+  return escalationPhrases.some(phrase => 
+    answer.toLowerCase().includes(phrase.toLowerCase())
+  );
+}
+
+// === Проверка на приветствие ===
+function isGreeting(question, detectedLang) {
+  const greetings = {
+    ru: ['привет', 'здравствуйте', 'добрый день', 'доброе утро', 'добрый вечер', 'салам', 'хай'],
+    az: ['salam', 'salamaleykum', 'sabahınız xeyir', 'günaydiniz', 'hai', 'привет'],
+    translit: ['privet', 'zdravstvuyte', 'dobry den', 'salam', 'hai']
+  };
+  
+  const normalizedQuestion = question.toLowerCase().trim();
+  
+  let checkWords = [];
+  if (detectedLang === 'ru' || detectedLang === 'ru_translit') {
+    checkWords = [...greetings.ru, ...greetings.translit];
+  } else {
+    checkWords = [...greetings.az, ...greetings.ru]; // азербайджанцы иногда пишут "привет"
+  }
+  
+  return checkWords.some(greeting => normalizedQuestion === greeting);
+}
+
 function shouldCompleteChat(question, detectedLang) {
   const normalizedQuestion = question.toLowerCase();
   
@@ -269,19 +429,29 @@ function extractFinalAnswer(rawResponse) {
 
 // === Основная логика бота ===
 async function askAI(question, kb, detectedLang, sessionId = null) {
-  // Инициализация сессии если нужно
+  // Проверяем, это приветствие при создании новой сессии
   if (sessionId && !activeSessions.has(sessionId)) {
-    activeSessions.set(sessionId, {
-      stage: 'greeting',
-      lastMessage: Date.now(),
-      language: detectedLang,
-      questionCount: 0
-    });
-    return {
-      answer: getGreeting(detectedLang),
-      sessionStage: 'greeting',
-      needsEscalation: false
-    };
+    if (isGreeting(question, detectedLang)) {
+      activeSessions.set(sessionId, {
+        stage: 'greeting',
+        lastMessage: Date.now(),
+        language: detectedLang,
+        questionCount: 0
+      });
+      return {
+        answer: getGreeting(detectedLang),
+        sessionStage: 'greeting',
+        needsEscalation: false
+      };
+    } else {
+      // Если не приветствие, создаем сессию и обрабатываем как обычный вопрос
+      activeSessions.set(sessionId, {
+        stage: 'active',
+        lastMessage: Date.now(),
+        language: detectedLang,
+        questionCount: 0
+      });
+    }
   }
 
   // Получаем состояние сессии
@@ -301,7 +471,7 @@ async function askAI(question, kb, detectedLang, sessionId = null) {
     };
   }
 
-  // Проверяем необходимость эскалации
+  // Проверяем необходимость эскалации по ключевым словам
   if (shouldEscalateToHuman(question, detectedLang)) {
     if (sessionId) {
       activeSessions.set(sessionId, { ...session, stage: 'escalated' });
@@ -340,9 +510,28 @@ async function askAI(question, kb, detectedLang, sessionId = null) {
   const exactQuestion = answerLang === 'ru' ? filteredKB[0].question_ru : filteredKB[0].question_az;
   const similarity = getSimilarity(question, exactQuestion, detectedLang, answerLang);
   
+  // Получаем ответ из базы
+  const directAnswer = answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
+  
+  // ✅ НОВАЯ ПРОВЕРКА: если ответ требует эскалации
+  if (shouldEscalateAnswer(directAnswer)) {
+    console.log(`🔄 Ответ требует эскалации: ${directAnswer.substring(0, 50)}...`);
+    
+    if (sessionId) {
+      activeSessions.set(sessionId, { ...session, stage: 'escalated' });
+    }
+    
+    return {
+      answer: getEscalationMessage(detectedLang),
+      sessionStage: 'escalated',
+      needsEscalation: true,
+      escalationReason: 'requires_manual_processing',
+      originalAnswer: directAnswer // сохраняем оригинальный ответ для контекста
+    };
+  }
+  
   // Высокое совпадение - даем прямой ответ
   if (similarity > 0.8) {
-    const directAnswer = answerLang === 'ru' ? filteredKB[0].answer_ru : filteredKB[0].answer_az;
     const fullAnswer = directAnswer + getFollowUpQuestion(detectedLang);
     
     if (sessionId) {
@@ -369,12 +558,14 @@ async function askAI(question, kb, detectedLang, sessionId = null) {
     .join('\n\n');
 
   const systemPrompt = `
-You are a helpful support assistant. Your task is to provide a clear, complete, and natural-language answer based on the knowledge base.
-- Use only the provided context.
-- Answer strictly in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}.
-- Do not include any thinking, reasoning or explanation tags.
-- If the answer is long, return the full text.
-- Do not shorten or summarize unless necessary.
+You are Algo-bot, a virtual assistant for educational platform support. Your task is to provide a clear, complete, and natural-language answer based ONLY on the knowledge base.
+- You are created by the educational platform team to help teachers
+- Use ONLY the provided context - never say you don't know who created you
+- Answer strictly in ${answerLang === 'ru' ? 'Russian' : 'Azerbaijani'}
+- Do not include any thinking, reasoning or explanation tags
+- If the answer is long, return the full text
+- Do not shorten or summarize unless necessary
+- Never say you don't have information if it's in the context
 `.trim();
 
   const userPrompt = `
