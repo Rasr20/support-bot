@@ -22,14 +22,15 @@ const ESCALATION_KEYWORDS = {
     'не помогает', 'не работает', 'не решается', 'проблема не решена',
     'переведите', 'соедините', 'хочу поговорить', 'нужна помощь человека',
     'срочно', 'жалоба', 'недоволен', 'плохо работает', 'баг', 'ошибка',
-    'не понимаю', 'сложная проблема', 'индивидуальный случай'
+    'не понимаю', 'сложная проблема', 'индивидуальный случай', 'Задание не работает', 'в задании проблема', 'есть проблема', 'МИQ', 'новый учитель', 'внутренний учитель', 'отпуск', 'компьютера нет', 'компьютеров не хватает', 'компьютер не работает', 'компьютер неисправен', 'компьютер не пришёл', 'компьютер не был отправлен', 'компьютер не выдан', 'проектор не пришёл', 'проектор не выдан', 'проектора нет'
   ],
   az: [
     'operator', 'canlı insan', 'əməkdaş', 'menecer', 'mütəxəssis',
     'kömək etmir', 'işləmir', 'həll olunmur', 'problem həll olunmadı',
     'köçürün', 'birləşdirin', 'danışmaq istəyirəm', 'insanın köməyi lazımdır',
     'təcili', 'şikayət', 'narazıyam', 'pis işləyir', 'səhv', 'xəta',
-    'başa düşmürəm', 'mürəkkəb problem', 'fərdi hal'
+    'başa düşmürəm', 'mürəkkəb problem', 'fərdi hal', 'Tapşırıq işləmir', 'tapşırıqda problem var', 'problem var', 'MİQ', 'yeni müəlli', 'daxili müəllim', 'məzuniyyət', 'kompüter yoxdur', 'kompüter çatışmır', 'kompüter işləmir', 'kompüter nasazdı', 'kompüter gəlməyib', 'kompüter göndərilməyib', 'kompüter verilməyib', 'proyektor gəlməyib', 'proyektor verilməyib', 'proyektor yoxdur'
+
   ],
   translit: [
     'operator', 'chelovek', 'sotrudnik', 'menedjer', 'specialist',
@@ -49,7 +50,7 @@ const COMPLETION_KEYWORDS = {
   az: [
     'təşəkkür', 'sağol', 'minnettaram', 'hamısı aydındır', 'hamısı başa düşülür',
     'sual yoxdur', 'daha sual yoxdur', 'hər şey yaxşıdır', 'həll olundu',
-    'kömək etdi', 'başa düşdüm', 'anladım'
+    'kömək etdi', 'başa düşdüm', 'anladım', 'çox sağ olun'
   ]
 };
 
