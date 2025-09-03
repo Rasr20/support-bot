@@ -50,7 +50,7 @@ const COMPLETION_KEYWORDS = {
   az: [
     'təşəkkür', 'sağol', 'minnettaram', 'hamısı aydındır', 'hamısı başa düşülür',
     'sual yoxdur', 'daha sual yoxdur', 'hər şey yaxşıdır', 'həll olundu',
-    'kömək etdi', 'başa düşdüm', 'anladım', 'çox sağ olun'
+    'kömək etdi', 'başa düşdüm', 'anladım', 'çox sağ olun', 'çox sağ ol', 'sağ ol', 'sağ olun'
   ]
 };
 
